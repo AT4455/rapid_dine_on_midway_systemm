@@ -1,0 +1,446 @@
+// Rapid Dine — Prisma schema for MySQL 8
+// Money is stored as DECIMAL(10,2) (never floating point).
+// Precise location history is intentionally short-lived and only stored per journey.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  RESTAURANT
+}
+
+enum MembershipRole {
+  OWNER
+  STAFF
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum JourneyStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum BountyStatus {
+  OPEN
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum BountyOfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+enum LocationSource {
+  GPS
+  SIMULATED
+  MANUAL
+}
+
+enum NotificationType {
+  BOUNTY_CREATED
+  BOUNTY_ACCEPTED
+  BOUNTY_REJECTED
+  ORDER_STATUS
+  ETA_UPDATE
+  KITCHEN_START
+  SYSTEM
+}
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique @db.VarChar(191)
+  passwordHash String  @db.VarChar(255)
+  name         String  @db.VarChar(120)
+  phone        String? @db.VarChar(30)
+  role         Role
+  avatarUrl    String? @db.VarChar(500)
+  isDemo       Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customerProfile   CustomerProfile?
+  memberships       RestaurantMembership[]
+  journeys          Journey[]
+  bounties          Bounty[]
+  orders            Order[]
+  notifications     Notification[]
+  locationUpdates   LocationUpdate[]
+  statusChanges     OrderStatusHistory[]
+  aiConversations   AIConversation[]
+
+  @@index([role])
+}
+
+model CustomerProfile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  dietaryPreferences Json?
+  allergies          String?  @db.Text
+  defaultBudget      Decimal? @db.Decimal(10, 2)
+  currency           String   @default("INR") @db.VarChar(3)
+  homeCity           String?  @db.VarChar(120)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Restaurant {
+  id                 String             @id @default(cuid())
+  name               String             @db.VarChar(160)
+  slug               String             @unique @db.VarChar(180)
+  description        String             @db.Text
+  cuisine            String             @db.VarChar(120)
+  imageUrl           String?            @db.VarChar(500)
+  address            String             @db.VarChar(300)
+  latitude           Decimal            @db.Decimal(10, 7)
+  longitude          Decimal            @db.Decimal(10, 7)
+  phone              String             @db.VarChar(30)
+  email              String             @db.VarChar(191)
+  pickupInstructions String             @db.Text
+  openingTime        String             @db.VarChar(5) // "HH:mm" local restaurant time
+  closingTime        String             @db.VarChar(5)
+  openDays           Json // [0..6], 0 = Sunday
+  averagePrepMinutes Int                @default(20)
+  capacityPerHour    Int                @default(12)
+  verificationStatus VerificationStatus @default(PENDING)
+  rating             Decimal            @default(4.5) @db.Decimal(2, 1)
+  ratingCount        Int                @default(0)
+  isActive           Boolean            @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   RestaurantMembership[]
+  menuItems     MenuItem[]
+  bounties      Bounty[]             @relation("AcceptedRestaurant")
+  preferredFor  Bounty[]             @relation("PreferredRestaurant")
+  offers        BountyOffer[]
+  orders        Order[]
+
+  @@index([isActive, verificationStatus])
+  @@index([latitude, longitude])
+}
+
+model RestaurantMembership {
+  id           String         @id @default(cuid())
+  userId       String
+  restaurantId String
+  role         MembershipRole @default(OWNER)
+
+  createdAt DateTime @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, restaurantId])
+  @@index([restaurantId])
+}
+
+model MenuItem {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  name            String   @db.VarChar(160)
+  description     String?  @db.Text
+  price           Decimal  @db.Decimal(10, 2)
+  category        String   @db.VarChar(80)
+  prepTimeMinutes Int
+  imageUrl        String?  @db.VarChar(500)
+  dietaryTags     Json // ["VEGETARIAN", "JAIN", ...]
+  allergens       Json // ["NUTS", "DAIRY", ...]
+  isAvailable     Boolean  @default(true)
+  isArchived      Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  bountyItems BountyItem[]
+  orderItems  OrderItem[]
+
+  @@unique([restaurantId, name])
+  @@index([restaurantId, isAvailable, isArchived])
+}
+
+model Journey {
+  id                  String        @id @default(cuid())
+  customerId          String
+  startLabel          String        @db.VarChar(220)
+  startLatitude       Decimal       @db.Decimal(10, 7)
+  startLongitude      Decimal       @db.Decimal(10, 7)
+  endLabel            String        @db.VarChar(220)
+  endLatitude         Decimal       @db.Decimal(10, 7)
+  endLongitude        Decimal       @db.Decimal(10, 7)
+  routeGeometry       Json // GeoJSON LineString coordinates [[lng,lat], ...]
+  routeDistanceMeters Int
+  routeDurationSeconds Int
+  corridorMeters      Int           @default(3000)
+  provider            String        @db.VarChar(40)
+  isFallback          Boolean       @default(false)
+  status              JourneyStatus @default(PLANNED)
+  lastEtaSeconds      Int?
+  lastEtaAt           DateTime?
+  lastLocationAt      DateTime?
+  startedAt           DateTime?
+  endedAt             DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customer   User             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  bounties   Bounty[]
+  orders     Order[]
+  locations  LocationUpdate[]
+  conversations AIConversation[]
+
+  @@index([customerId, status])
+  @@index([createdAt])
+}
+
+model Bounty {
+  id                    String       @id @default(cuid())
+  customerId            String
+  journeyId             String
+  preferredRestaurantId String?
+  acceptedRestaurantId  String?
+  status                BountyStatus @default(OPEN)
+  budget                Decimal      @db.Decimal(10, 2)
+  currency              String       @default("INR") @db.VarChar(3)
+  note                  String?      @db.Text
+  pickupEtaMinutes      Int
+  estimatedArrivalAt    DateTime?
+  expiresAt             DateTime
+  acceptedAt            DateTime?
+  rejectedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customer            User          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  journey             Journey       @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  preferredRestaurant Restaurant?   @relation("PreferredRestaurant", fields: [preferredRestaurantId], references: [id], onDelete: SetNull)
+  acceptedRestaurant  Restaurant?   @relation("AcceptedRestaurant", fields: [acceptedRestaurantId], references: [id], onDelete: SetNull)
+  items               BountyItem[]
+  offers              BountyOffer[]
+  order               Order?
+
+  @@index([customerId, createdAt])
+  @@index([status, expiresAt])
+  @@index([acceptedRestaurantId])
+  @@index([preferredRestaurantId])
+}
+
+model BountyItem {
+  id                 String  @id @default(cuid())
+  bountyId           String
+  menuItemId         String?
+  dishName           String  @db.VarChar(160)
+  quantity           Int
+  referenceUnitPrice Decimal @db.Decimal(10, 2)
+
+  bounty   Bounty    @relation(fields: [bountyId], references: [id], onDelete: Cascade)
+  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  @@index([bountyId])
+  @@index([menuItemId])
+}
+
+model BountyOffer {
+  id                     String            @id @default(cuid())
+  bountyId               String
+  restaurantId           String
+  status                 BountyOfferStatus @default(PENDING)
+  isPreferred            Boolean           @default(false)
+  distanceFromRouteMeters Int
+  detourMeters           Int               @default(0)
+  matchedTotal           Decimal?          @db.Decimal(10, 2)
+  rejectionReason        String?           @db.VarChar(300)
+  respondedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bounty     Bounty     @relation(fields: [bountyId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([bountyId, restaurantId])
+  @@index([restaurantId, status])
+  @@index([bountyId, status])
+}
+
+model Order {
+  id                String      @id @default(cuid())
+  orderNumber       String      @unique @db.VarChar(24)
+  bountyId          String      @unique
+  customerId        String
+  restaurantId      String
+  journeyId         String?
+  status            OrderStatus @default(ACCEPTED)
+  subtotal          Decimal     @db.Decimal(10, 2)
+  fees              Decimal     @default(0) @db.Decimal(10, 2)
+  total             Decimal     @db.Decimal(10, 2)
+  currency          String      @default("INR") @db.VarChar(3)
+  prepTimeMinutes   Int
+  pickupInstructions String     @db.Text
+  customerNote      String?     @db.Text
+  estimatedReadyAt  DateTime?
+  etaUpdatedAt      DateTime?
+  cookingStartAt    DateTime?
+  cookNotifiedAt    DateTime?
+  kitchenWarning    String?     @db.VarChar(300)
+  acceptedAt        DateTime    @default(now())
+  preparingAt       DateTime?
+  readyAt           DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bounty     Bounty     @relation(fields: [bountyId], references: [id], onDelete: Restrict)
+  customer   User       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Restrict)
+  journey    Journey?   @relation(fields: [journeyId], references: [id], onDelete: SetNull)
+
+  items        OrderItem[]
+  statusHistory OrderStatusHistory[]
+
+  @@index([restaurantId, status])
+  @@index([customerId, status])
+  @@index([status, cookingStartAt])
+}
+
+model OrderItem {
+  id              String  @id @default(cuid())
+  orderId         String
+  menuItemId      String?
+  nameSnapshot    String  @db.VarChar(160)
+  unitPrice       Decimal @db.Decimal(10, 2)
+  quantity        Int
+  prepTimeMinutes Int
+  lineTotal       Decimal @db.Decimal(10, 2)
+  dietaryTags     Json
+
+  order    Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([menuItemId])
+}
+
+model OrderStatusHistory {
+  id         String       @id @default(cuid())
+  orderId    String
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actorId    String?
+  actorRole  String       @db.VarChar(20)
+  note       String?      @db.VarChar(300)
+
+  createdAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+  @@index([actorId])
+}
+
+model LocationUpdate {
+  id             String         @id @default(cuid())
+  journeyId      String
+  customerId     String
+  latitude       Decimal        @db.Decimal(10, 7)
+  longitude      Decimal        @db.Decimal(10, 7)
+  accuracyMeters Int?
+  etaSeconds     Int?
+  source         LocationSource @default(GPS)
+  recordedAt     DateTime       @default(now())
+  createdAt      DateTime       @default(now())
+
+  journey  Journey @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  customer User    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([journeyId, recordedAt])
+  @@index([customerId, recordedAt])
+}
+
+model Notification {
+  id           String           @id @default(cuid())
+  userId       String
+  restaurantId String?
+  orderId      String?
+  bountyId     String?
+  type         NotificationType
+  title        String           @db.VarChar(160)
+  body         String           @db.Text
+  data         Json?
+  dedupeKey    String?          @unique @db.VarChar(191)
+  readAt       DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+model AIConversation {
+  id        String   @id @default(cuid())
+  userId    String
+  journeyId String?
+  title     String   @db.VarChar(160)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  journey  Journey?    @relation(fields: [journeyId], references: [id], onDelete: SetNull)
+  messages AIMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model AIMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String   @db.VarChar(20)
+  content        String   @db.Text
+  meta           Json?
+  createdAt      DateTime @default(now())
+
+  conversation AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
