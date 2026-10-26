@@ -22,6 +22,19 @@ const port = Number(process.env.PORT || 3000);
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
+if (process.env.MEMORY_DIAGNOSTICS === "true") {
+  setInterval(() => {
+    const m = process.memoryUsage();
+
+    console.log("[memory]", {
+      rssMB: Math.round(m.rss / 1024 / 1024),
+      heapUsedMB: Math.round(m.heapUsed / 1024 / 1024),
+      heapTotalMB: Math.round(m.heapTotal / 1024 / 1024),
+      externalMB: Math.round(m.external / 1024 / 1024),
+    });
+  }, 60_000).unref();
+}
+
 function parseCookies(header: string | undefined) {
   const out: Record<string, string> = {};
   if (!header) return out;
